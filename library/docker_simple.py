@@ -107,6 +107,9 @@ class Container:
         # Nothing changed on the remote host by default
         self.changed = False
 
+        # Very helpful for debugging
+        self.change_reason = []
+
         # We need those values in a couple of places
         # 'name' is guaranteed to be present by ansible
         self.name = kwargs['name']
@@ -169,6 +172,206 @@ class Container:
                                           self.run_command_str)
             self.prev_commands_file.truncate()
         self.prev_commands_file.close()
+
+    def ensure_running(self):
+        """
+        Make sure the container is running. If the image is outdated, it is
+        rebuilt first and then the container is restarted.
+        """
+
+        self.ensure_image_is_updated()
+
+        if self.run_command_str != self.prev_run_command:
+            self.change_reason.append("Arguments changed for run command")
+
+        runs = self.running()
+        if runs:
+            if self.changed or self.run_command_str != self.prev_run_command:
+                self.stop()
+                self.remove()
+                self.run()
+        elif runs is None:
+            self.run()
+        else:
+            if self.changed or self.run_command_str != self.prev_run_command:
+                self.remove()
+                self.run()
+            else:
+                self.start()
+
+    def ensure_stopped(self):
+        """
+        Make sure that the container is stopped.
+        """
+
+        if self.running():
+            self.stop()
+
+    def ensure_restarted(self):
+        """
+        Make sure the container is running and restart it if it already is.
+        """
+
+        runs = self.running()
+        if runs:
+            self.restart()
+        elif runs is None:
+            self.run()
+        else:
+            # If the image changed, just issuing a restart won't be enough
+            if self.changed:
+                self.remove()
+                self.run()
+            else:
+                self.start()
+
+    def ensure_image_is_updated(self):
+        """
+        Make sure the image of the container is up to date and rebuild it if
+        necessary.
+        """
+
+        if self.is_local_image:
+            if self.needs_rebuild():
+                self.build()
+        else:
+            if self.needs_pull():
+                self.pull()
+
+    def needs_rebuild(self):
+        """
+        Check, whether the image needs to be rebuilt. This function looks at
+        the path to the Dockerfile and checks, whether any files there are
+        newer than the docker image.
+
+        :return: True if the image needs to be rebuilt, False otherwise.
+        """
+
+        # If the build command changed, we definitely have to rebuild it
+        if self.build_command_str != self.prev_build_command:
+            self.change_reason.append("Arguments changed for build command")
+            return True
+
+        # Get the creation time of the docker image
+        try:
+            time_str = exec_command(['docker', 'inspect', '--format', '{{.Created}}', self.image])
+        except CalledProcessError:
+            # If that command fails, we assume that the image was not found
+            self.change_reason.append("Image not found, needs rebuild")
+            return True
+
+        # Convert the time to a format we can use for comparisons
+        image_creation_time = datetime.datetime.strptime(time_str[:26], "%Y-%m-%dT%H:%M:%S.%f")
+
+        # Iterate over all files in the image path to see if any of those files
+        # were more recently modified than the image creation time.
+        for root, subdirs, files in os.walk(self.path):
+            for filename in files:
+                file_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(os.path.join(root, filename)))
+                if image_creation_time < file_mtime:
+                    self.change_reason.append("File changed: " + filename)
+                    return True
+        return False
+
+    def needs_pull(self):
+        """
+        Check, whether the image for the container already exists locally or
+        if it has to be pulled first. This function can currently not check,
+        if the local version is also the newest one, it only checks whether
+        it exists locally or not.
+
+        :return: True if it needs to be pulled and doesn't exist locally, False otherwise.
+        """
+
+        try:
+            return not exec_command(['docker', 'inspect', '--format', '{{.ID}}', self.image])
+        except CalledProcessError:
+            # If that command fails, we assume that the image was not found locally
+            self.change_reason.append("Image not found, needs pull")
+            return True
+
+    def running(self):
+        """
+        Check, whether the container is running or not.
+
+        :return: True if it is running, False otherwise.
+        """
+
+        try:
+            # This will either be 'true' (container runs), 'false' (container
+            # is stopped) or throw an exception (container doesn't exist).
+            return 'true' in exec_command(['docker', 'inspect', '--format', '"{{.State.Running}}"', self.name])
+        except CalledProcessError as e:
+            # If that command fails, the container is not just not running, but it also doesn't exist
+            return None
+
+    def run(self):
+        """
+        Run the container.
+        """
+
+        exec_command(self.run_command)
+        self.change_reason.append("Executed 'docker run'")
+        self.changed = True
+
+    def start(self):
+        """
+        Starts an existing container.
+        """
+
+        self.change_reason.append("Executed 'docker start'")
+        exec_command(['docker', 'start', self.name])
+        self.changed = True
+
+    def restart(self):
+        """
+        Restart the docker container (or start it if it wasn't running).
+        """
+
+        if self.changed:
+            self.stop()
+            self.remove()
+            self.run()
+        else:
+            self.change_reason.append("Executed 'docker restart'")
+            exec_command(['docker', 'restart', self.name])
+            self.changed = True
+
+    def stop(self):
+        """
+        Stop the docker container.
+        """
+
+        self.change_reason.append("Executed 'docker stop'")
+        exec_command(['docker', 'stop', self.name])
+        self.changed = True
+
+    def remove(self):
+        """
+        Remove the docker container.
+        """
+
+        self.change_reason.append("Executed 'docker rm'")
+        exec_command(['docker', 'rm', self.name])
+        self.changed = True
+
+    def build(self):
+        """
+        Build the docker image of the container.
+        """
+
+        exec_command(self.build_command, cwd=self.path)
+        self.change_reason.append("Executed 'docker build'")
+        self.changed = True
+
+    def pull(self):
+        """
+        Pull the image of the container from the registry.
+        """
+
+        exec_command(['docker', 'pull', self.image])
+        self.change_reason.append("Executed 'docker pull'")
+        self.changed = True
 
     @staticmethod
     def _construct_docker_build_command(image, **kwargs):
@@ -262,192 +465,6 @@ class Container:
                 # It might be a number that has to be converted to a string first
                 command.extend([arg_name, str(value)])
         return command
-
-    def ensure_image_is_updated(self):
-        """
-        Make sure the image of the container is up to date and rebuild it if
-        necessary.
-        """
-
-        if self.is_local_image:
-            if self.needs_rebuild():
-                self.build()
-        else:
-            if self.needs_pull():
-                self.pull()
-
-    def ensure_running(self):
-        """
-        Make sure the container is running. If the image is outdated, it is
-        rebuilt first and then the container is restarted.
-        """
-
-        self.ensure_image_is_updated()
-
-        runs = self.running()
-        if runs:
-            if self.changed or self.run_command_str != self.prev_run_command:
-                # In case the run command changed, influences self.restart()
-                self.changed = True
-                self.restart()
-        elif runs is None:
-            self.run()
-        else:
-            if self.changed or self.run_command_str != self.prev_run_command:
-                self.remove()
-                self.run()
-            else:
-                self.start()
-
-    def run(self):
-        """
-        Run the container.
-        """
-
-        exec_command(self.run_command)
-        self.changed = True
-
-    def build(self):
-        """
-        Build the docker image of the container.
-        """
-
-        exec_command(self.build_command, cwd=self.path)
-        self.changed = True
-
-    def needs_rebuild(self):
-        """
-        Check, whether the image needs to be rebuilt. This function looks at
-        the path to the Dockerfile and checks, whether any files there are
-        newer than the docker image.
-
-        :return: True if the image needs to be rebuilt, False otherwise.
-        """
-
-        # If the build command changed, we definitely have to rebuild it
-        if self.build_command_str != self.prev_build_command:
-            return True
-
-        # Get the creation time of the docker image
-        try:
-            time_str = exec_command(['docker', 'inspect', '--format', '{{.Created}}', self.image])
-        except CalledProcessError:
-            # If that command fails, we assume that the image was not found
-            return True
-
-        # Convert the time to a format we can use for comparisons
-        image_creation_time = datetime.datetime.strptime(time_str[:26], "%Y-%m-%dT%H:%M:%S.%f")
-
-        # Iterate over all files in the image path to see if any of those files
-        # were more recently modified than the image creation time.
-        for root, subdirs, files in os.walk(self.path):
-            for filename in files:
-                file_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(os.path.join(root, filename)))
-                if image_creation_time < file_mtime:
-                    return True
-        return False
-
-    def needs_pull(self):
-        """
-        Check, whether the image for the container already exists locally or
-        if it has to be pulled first. This function can currently not check,
-        if the local version is also the newest one, it only checks whether
-        it exists locally or not.
-
-        :return: True if it needs to be pulled and doesn't exist locally, False otherwise.
-        """
-
-        try:
-            return not exec_command(['docker', 'inspect', '--format', '{{.ID}}', self.image])
-        except CalledProcessError:
-            # If that command fails, we assume that the image was not found locally
-            return True
-
-    def running(self):
-        """
-        Check, whether the container is running or not.
-
-        :return: True if it is running, False otherwise.
-        """
-
-        try:
-            # This will either be 'true' (container runs), 'false' (container
-            # is stopped) or throw an exception (container doesn't exist).
-            return 'true' in exec_command(['docker', 'inspect', '--format', '"{{.State.Running}}"', self.name])
-        except CalledProcessError as e:
-            # If that command fails, the container is not just not running, but it also doesn't exist
-            return None
-
-    def pull(self):
-        """
-        Pull the image of the container from the registry.
-        """
-
-        exec_command(['docker', 'pull', self.image])
-        self.changed = True
-
-    def ensure_restarted(self):
-        """
-        Make sure the container is running and restart it if it already is.
-        """
-
-        runs = self.running()
-        if runs:
-            self.restart()
-        elif runs is None:
-            self.run()
-        else:
-            # If the image changed, just issuing a restart won't be enough
-            if self.changed:
-                self.remove()
-                self.run()
-            else:
-                self.start()
-
-    def ensure_stopped(self):
-        """
-        Make sure that the container is stopped.
-        """
-
-        if self.running():
-            self.stop()
-
-    def start(self):
-        """
-        Starts an existing container.
-        """
-
-        exec_command(['docker', 'start', self.name])
-        self.changed = True
-
-    def restart(self):
-        """
-        Restart the docker container (or start it if it wasn't running).
-        """
-
-        if self.changed:
-            self.stop()
-            self.remove()
-            self.run()
-        else:
-            exec_command(['docker', 'restart', self.name])
-            self.changed = True
-
-    def stop(self):
-        """
-        Stop the docker container.
-        """
-
-        exec_command(['docker', 'stop', self.name])
-        self.changed = True
-
-    def remove(self):
-        """
-        Remove the docker container.
-        """
-
-        exec_command(['docker', 'rm', self.name])
-        self.changed = True
 
 
 def run_module():
@@ -582,7 +599,8 @@ def run_module():
 
     # Inform ansible that we were successful and whether something changed on
     # the remote host or not.
-    result = dict(changed=container.changed)
+    result = dict(changed=container.changed,
+                  change_reason=container.change_reason)
     module.exit_json(**result)
     return result
 
