@@ -267,7 +267,7 @@ class Container:
         # were more recently modified than the image creation time.
         for root, subdirs, files in os.walk(self.path):
             for filename in files:
-                file_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(os.path.join(root, filename)))
+                file_mtime = datetime.datetime.utcfromtimestamp(os.path.getmtime(os.path.join(root, filename)))
                 if image_creation_time < file_mtime:
                     self.change_reason.append("File changed: " + filename)
                     return True
