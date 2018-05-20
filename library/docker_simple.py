@@ -360,6 +360,8 @@ class Container:
         Build the docker image of the container.
         """
 
+        # Makes sure this runs in the directory where the Dockerfile is,
+        # otherwise the command would be wrong.
         exec_command(self.build_command, cwd=self.path)
         self.change_reason.append("Executed 'docker build'")
         self.changed = True
@@ -398,6 +400,10 @@ class Container:
 
         # Construct the build command from the bulid_args
         build_command = Container._construct_docker_command('build', **build_args)
+
+        # We use this because in some cases, the creation time is not updated
+        # otherwise
+        build_command.append("--no-cache")
 
         # The last argument is the path to the Dockerfile. We will make sure
         # that we change to the directory where the Dockerfile resides first
