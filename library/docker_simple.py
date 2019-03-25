@@ -60,6 +60,7 @@ import distutils.dir_util
 from distutils.errors import DistutilsFileError
 from subprocess import check_output as exec_command
 from subprocess import CalledProcessError
+from subprocess import STDOUT
 from six import iteritems
 from ansible.module_utils.basic import AnsibleModule
 
@@ -110,6 +111,9 @@ class Container:
         # Very helpful for debugging
         self.change_reason = []
 
+        # Useful when running a container in the foreground
+        self.run_stdout = ""
+
         # We need those values in a couple of places
         # 'name' is guaranteed to be present by ansible
         self.name = kwargs['name']
@@ -133,6 +137,7 @@ class Container:
         # restart. We do that by saving the commands that were used for
         # starting the current sessions of the containers somewhere.
         distutils.dir_util.mkpath(DOCKER_COMMANDS_PATH, mode=0o600)
+
         # With the mode 'r+', the file isn't created if it doesn't exist
         try:
             self.prev_commands_file = open(DOCKER_COMMANDS_PATH + '/' + self.name, 'r+')
@@ -183,6 +188,8 @@ class Container:
 
         if self.run_command_str != self.prev_run_command:
             self.change_reason.append("Arguments changed for run command")
+            self.change_reason.append(self.run_command_str)
+            self.change_reason.append(self.prev_run_command)
 
         runs = self.running()
         if runs:
@@ -250,11 +257,13 @@ class Container:
         # If the build command changed, we definitely have to rebuild it
         if self.build_command_str != self.prev_build_command:
             self.change_reason.append("Arguments changed for build command")
+            self.change_reason.append(self.build_command_str)
+            self.change_reason.append(self.prev_build_command)
             return True
 
         # Get the creation time of the docker image
         try:
-            time_str = exec_command(['docker', 'inspect', '--format', '{{.Created}}', self.image])
+            time_str = exec_command(['docker', 'inspect', '--format', '{{.Created}}', self.image], stderr=STDOUT, universal_newlines=True)
         except CalledProcessError:
             # If that command fails, we assume that the image was not found
             self.change_reason.append("Image not found, needs rebuild")
@@ -284,7 +293,7 @@ class Container:
         """
 
         try:
-            return not exec_command(['docker', 'inspect', '--format', '{{.ID}}', self.image])
+            return not exec_command(['docker', 'inspect', '--format', '{{.ID}}', self.image], stderr=STDOUT, universal_newlines=True)
         except CalledProcessError:
             # If that command fails, we assume that the image was not found locally
             self.change_reason.append("Image not found, needs pull")
@@ -300,7 +309,7 @@ class Container:
         try:
             # This will either be 'true' (container runs), 'false' (container
             # is stopped) or throw an exception (container doesn't exist).
-            return 'true' in exec_command(['docker', 'inspect', '--format', '"{{.State.Running}}"', self.name])
+            return 'true' in exec_command(['docker', 'inspect', '--format', '"{{.State.Running}}"', self.name], stderr=STDOUT, universal_newlines=True)
         except CalledProcessError as e:
             # If that command fails, the container is not just not running, but it also doesn't exist
             return None
@@ -310,7 +319,7 @@ class Container:
         Run the container.
         """
 
-        exec_command(self.run_command)
+        self.run_stdout = exec_command(self.run_command, stderr=STDOUT, universal_newlines=True)
         self.change_reason.append("Executed 'docker run'")
         self.changed = True
 
@@ -320,7 +329,7 @@ class Container:
         """
 
         self.change_reason.append("Executed 'docker start'")
-        exec_command(['docker', 'start', self.name])
+        exec_command(['docker', 'start', self.name], stderr=STDOUT, universal_newlines=True)
         self.changed = True
 
     def restart(self):
@@ -334,7 +343,7 @@ class Container:
             self.run()
         else:
             self.change_reason.append("Executed 'docker restart'")
-            exec_command(['docker', 'restart', self.name])
+            exec_command(['docker', 'restart', self.name], stderr=STDOUT, universal_newlines=True)
             self.changed = True
 
     def stop(self):
@@ -343,7 +352,7 @@ class Container:
         """
 
         self.change_reason.append("Executed 'docker stop'")
-        exec_command(['docker', 'stop', self.name])
+        exec_command(['docker', 'stop', self.name], stderr=STDOUT, universal_newlines=True)
         self.changed = True
 
     def remove(self):
@@ -352,7 +361,7 @@ class Container:
         """
 
         self.change_reason.append("Executed 'docker rm'")
-        exec_command(['docker', 'rm', self.name])
+        exec_command(['docker', 'rm', self.name], stderr=STDOUT, universal_newlines=True)
         self.changed = True
 
     def build(self):
@@ -362,7 +371,7 @@ class Container:
 
         # Makes sure this runs in the directory where the Dockerfile is,
         # otherwise the command would be wrong.
-        exec_command(self.build_command, cwd=self.path)
+        exec_command(self.build_command, cwd=self.path, stderr=STDOUT, universal_newlines=True)
         self.change_reason.append("Executed 'docker build'")
         self.changed = True
 
@@ -371,7 +380,7 @@ class Container:
         Pull the image of the container from the registry.
         """
 
-        exec_command(['docker', 'pull', self.image])
+        exec_command(['docker', 'pull', self.image], stderr=STDOUT, universal_newlines=True)
         self.change_reason.append("Executed 'docker pull'")
         self.changed = True
 
@@ -428,16 +437,21 @@ class Container:
         # we will have an unknown argument.
         command = kwargs.pop('command')
 
+        # We have to extract this from the arguments before we build the
+        # command.
+        foreground = kwargs.pop('foreground')
+
         # Construct the run command from the kwargs
         run_command = Container._construct_docker_command('run', **kwargs)
 
-        # We want to run it in the background
-        run_command.append('-d')
+        # We want to run it in the background by default
+        if not foreground:
+            run_command.append('-d')
 
         # These arguments don't have a name and have to be last
         run_command.append(image)
         if command:
-            run_command.append(command)
+            run_command.extend(command)
 
         return run_command
 
@@ -457,8 +471,9 @@ class Container:
         command = ['docker', command]
 
         # Iterate over every argument. The key is also the name of the command
-        # line argument for the docker command.
-        for key, value in iteritems(kwargs):
+        # line argument for the docker command. We sort the keys to make sure
+        # the docker command strings are reproducible.
+        for key, value in sorted(kwargs.items()):
             # To have a valid command line argument name, we have to alter the key a bit
             arg_name = '--' + key.replace('_', '-')
 
@@ -468,10 +483,11 @@ class Container:
                     command.extend([arg_name, str(list_item)])
             # It might happen that the value is None
             elif value:
-                # It might be a number that has to be converted to a string first
-                command.extend([arg_name, str(value)])
+                # If it's a bool, we only append the key
+                if not isinstance(value, bool):
+                    # It might be a number that has to be converted to a string first
+                    command.extend([arg_name, str(value)])
         return command
-
 
 def run_module():
     """
@@ -488,7 +504,8 @@ def run_module():
         name=dict(type='str', required=True, default=None),
         image=dict(type='str', required=False, default=None),
         path=dict(type='str', required=False, default=None),
-        command=dict(type='str', required=False, default=None),
+        command=dict(type='list', required=False, default=None),
+        foreground=dict(type='bool', required=False, default=False),
         build_args=dict(type='dict', required=False, default=None),
         add_host=dict(type='list', required=False, default=None),
         blkio_weight=dict(type='int', required=False, default=None),
@@ -548,10 +565,10 @@ def run_module():
         userns=dict(type='str', required=False, default=None),
         pids_limit=dict(type='str', required=False, default=None),
         uts=dict(type='str', required=False, default=None),
-        privileged=dict(type='str', required=False, default=None),
-        read_only=dict(type='str', required=False, default=None),
+        privileged=dict(type='bool', required=False, default=None),
+        read_only=dict(type='bool', required=False, default=None),
         restart=dict(type='str', required=False, default=None),
-        rm=dict(type='str', required=False, default=None),
+        rm=dict(type='bool', required=False, default=None),
         security_opt=dict(type='list', required=False, default=None),
         storage_opt=dict(type='list', required=False, default=None),
         stop_signal=dict(type='str', required=False, default=None),
@@ -606,7 +623,8 @@ def run_module():
     # Inform ansible that we were successful and whether something changed on
     # the remote host or not.
     result = dict(changed=container.changed,
-                  change_reason=container.change_reason)
+                  change_reason=container.change_reason,
+                  stdout=container.run_stdout)
     module.exit_json(**result)
     return result
 
