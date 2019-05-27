@@ -2,6 +2,7 @@
 dependencies: []
 
 galaxy_info:
+  role_name: docker_simple
   author: Shadowigor
   description: Intuitive wrapper for the docker command
   license: license GPLv3
@@ -9,10 +10,6 @@ galaxy_info:
   # I have to admit, they're not all tested but I don't see a reason why it
   # wouldn't work on some platform.
   platforms:
-    - name: EL
-      versions:
-        - 6
-        - 7
     - name: Fedora
       versions:
         - all
