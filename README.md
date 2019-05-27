@@ -15,10 +15,11 @@ With the module you are describing the state of a container. It can have the fol
  - `running`: Makes sure the image you are using is up to date, rebuilds/pulls it if needed and then starts a container with the given image and name. The container is recreated and restarted if the image or the run arguments change.
  - `stopped`: Makes sure there is no container running with a given name.
  - `restarted`: Same as `running`, but the container is definitely restarted, even if nothing changed.
+ - `built`: Makes sure the image is built, but doesn't start a container.
 
 ## How to use it
 
-Use it as a normal docker module with the following parametes:
+Use it as a normal docker module with the following parameters:
 
 - `state`: See above
 - `name`: The name of the container.
@@ -64,4 +65,4 @@ library = /usr/share/ansible/library  # Or wherever you want your extra modules
 And put the contents of the `library` folder there.
 
 ---
-Copyright (C) 2018 Alain Kohli
+Copyright (C) 2019 Alain Kohli
