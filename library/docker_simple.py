@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-# Copyright (C) 2018 Alain Kohli
+# Copyright (C) 2019 Alain Kohli
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -22,9 +22,10 @@ pulled/built if needed. The module arguments translate 1:1 to command line
 arguments for the 'docker run' command, with a few exceptions:
 
 state: running   - The container image is up to date and the container is running
-       restarted - The container image is up to date and the container is started (restarted
-                   if it was already running)
+       restarted - The container image is up to date and the container is started
+                   (restarted if it was already running)
        stopped   - The container is not running
+       built     - The image specified is built, but no container is started
 
 name: The name of the container.
 
@@ -500,7 +501,7 @@ def run_module():
 
     # Define the available arguments/parameters that a user can pass to the module
     module_args = dict(
-        state=dict(type='str', required=True, default=None, choices=['running', 'stopped', 'restarted']),
+        state=dict(type='str', required=True, default=None, choices=['running', 'stopped', 'restarted', 'built']),
         name=dict(type='str', required=True, default=None),
         image=dict(type='str', required=False, default=None),
         path=dict(type='str', required=False, default=None),
@@ -617,6 +618,8 @@ def run_module():
             container.ensure_restarted()
         elif state == 'stopped':
             container.ensure_stopped()
+        elif state == 'built':
+            container.ensure_image_is_updated()
     except CalledProcessError as e:
         return fail(module, 'Docker command failed: ' + ' '.join(e.cmd) + '\n\n' + e.output)
 
