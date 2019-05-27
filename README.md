@@ -56,13 +56,24 @@ Note: A dash (`-`) in an argument name is replace by an underscore (`_`).
 
 ## How to install
 
-If you want to use it in a playbook, just copy the `library` folder to the root directory of your playbook. If you want to install it systemwide, add an entry to your `/etc/ansible/ansible.cfg`:
+To make this module a dependency of your playbook, add the following to the `requirements.yml` file in the root directory of your playbook:
 
-```
-library = /usr/share/ansible/library  # Or wherever you want your extra modules
+```yaml
+- src: shadowigor.docker_simple
 ```
 
-And put the contents of the `library` folder there.
+Before running your playbook for the first time, run the following command:
+```bash
+ansible-galaxy install -r requirements.yml
+```
+
+You will also have to run the role before you can use it. For this you can add this to the top of your `site.yml` file:
+
+```yaml
+- hosts: all
+  roles:
+  - shadowigor.docker_simple
+```
 
 ---
 Copyright (C) 2019 Alain Kohli
